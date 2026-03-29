@@ -55,14 +55,16 @@ int readHexFile(const char* hexFilename);
 
 uint8_t ram[0x10000];
 
-uint8_t MemRead(uint16_t addr, bool isDbg)
+uint8_t MemRead(uint16_t addr, bool isDbg, void* userData)
 {
   (void)isDbg;
+  (void)userData;
   return ram[addr];
 }
 
-void MemWrite(uint16_t addr, uint8_t val)
+void MemWrite(uint16_t addr, uint8_t val, void* userData)
 {
+  (void)userData;
   ram[addr] = val;
 }
 
@@ -92,7 +94,7 @@ int main(int argc, char* argv[])
   /*
    * build and test the cpu
    */
-  VrEmu6502* vr6502 = vrEmu6502New(cpuModel, MemRead, MemWrite);
+  VrEmu6502* vr6502 = vrEmu6502New(cpuModel, MemRead, MemWrite, NULL);
   if (vr6502)
   {
     /* reset the cpu (technically don't need to do this as vrEmu6502New does reset it) */
@@ -375,7 +377,7 @@ void outputStep(VrEmu6502* vr6502)
 
 
   printf("#%-10"PRId64" | $%04x | %-14s | $%02x | $%02x | $%02x | $%02x: $%02x | $%02x: %c%c%c%c%c%c ",
-    instructionCount, pc, buffer, a, x, y, sp, MemRead(0x100 + ((sp + 1) & 0xff), 0), status,
+    instructionCount, pc, buffer, a, x, y, sp, MemRead(0x100 + ((sp + 1) & 0xff), 0, NULL), status,
     status & FlagN ? 'N' : '.',
     status & FlagV ? 'V' : '.',
     status & FlagD ? 'D' : '.',
@@ -387,7 +389,7 @@ void outputStep(VrEmu6502* vr6502)
 
   for (int i = 0; i < showMemBytes; ++i)
   {
-    printf("$%02x ", MemRead((showMemFrom + i) & 0xffff, 0));
+    printf("$%02x ", MemRead((showMemFrom + i) & 0xffff, 0, NULL));
   }
   putchar('\n');
 }
