@@ -2617,6 +2617,10 @@ static void jam(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 #define ldd_imm { ldd, imm, 2 }
 #define kil     { jam, imp, 1 }
 
+/* backplane patch: 65C02 BIT abs,X ($3C) is a read and takes the page-
+   crossing cycle, so its entries use axp; upstream used abx, which counted
+   no extra cycle. */
+
 
 static const vrEmu6502Opcode _std6502[256] = {
   /*      |      _0      |      _1      |      _2      |      _3      |      _4      |      _5      |      _6      |      _7      |      _8      |      _9      |      _A      |      _B      |      _C      |      _D      |      _E      |      _F      | */
@@ -2661,7 +2665,7 @@ static const vrEmu6502Opcode _std65c02[256] = {
   /* 0_ */ {brk, imp, 7}, {ora, xin, 6},    ldd_imm   ,    unnop11   , {tsb,  zp, 5}, {ora,  zp, 3}, {asl,  zp, 5},    unnop11   , {php, imp, 3}, {ora, imm, 2}, {asl, acc, 2},    unnop11   , {tsb,  ab, 6}, {ora,  ab, 4}, {asl,  ab, 6},    unnop11   ,
   /* 1_ */ {bpl, rel, 2}, {ora, yip, 5}, {ora, zpi, 5},    unnop11   , {trb,  zp, 5}, {ora, zpx, 4}, {asl, zpx, 6},    unnop11   , {clc, imp, 2}, {ora, ayp, 4}, {inc, acc, 2},    unnop11   , {trb,  ab, 6}, {ora, axp, 4}, {asl, axp, 6},    unnop11   ,
   /* 2_ */ {jsr,  ab, 6}, { and, xin, 6},    ldd_imm   ,    unnop11   , {bit,  zp, 3}, { and,  zp, 3}, {rol,  zp, 5},    unnop11   , {plp, imp, 4}, { and, imm, 2}, {rol, acc, 2},    unnop11   , {bit,  ab, 4}, { and,  ab, 4}, {rol,  ab, 6},    unnop11   ,
-  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6},    unnop11   , {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, abx, 4}, { and, axp, 4}, {rol, axp, 6},    unnop11   ,
+  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6},    unnop11   , {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, axp, 4}, { and, axp, 4}, {rol, axp, 6},    unnop11   ,
   /* 4_ */ {rti, imp, 6}, {eor, xin, 6},    ldd_imm   ,    unnop11   , {ldd,  zp, 3}, {eor,  zp, 3}, {lsr,  zp, 5},    unnop11   , {pha, imp, 3}, {eor, imm, 2}, {lsr, acc, 2},    unnop11   , {jmp,  ab, 3}, {eor,  ab, 4}, {lsr,  ab, 6},    unnop11   ,
   /* 5_ */ {bvc, rel, 2}, {eor, yip, 5}, {eor, zpi, 5},    unnop11   , {ldd, zpx, 4}, {eor, zpx, 4}, {lsr, zpx, 6},    unnop11   , {cli, imp, 2}, {eor, ayp, 4}, {phy, imp, 3},    unnop11   , {ldd,  ab, 8}, {eor, axp, 4}, {lsr, axp, 6},    unnop11   ,
   /* 6_ */ {rts, imp, 6}, {adc, xin, 6},    ldd_imm   ,    unnop11   , {stz,  zp, 3}, {adc,  zp, 3}, {ror,  zp, 5},    unnop11   , {pla, imp, 4}, {adc, imm, 2}, {ror, acc, 2},    unnop11   , {jmp, ind, 6}, {adc,  ab, 4}, {ror,  ab, 6},    unnop11   ,
@@ -2681,7 +2685,7 @@ static const vrEmu6502Opcode __not_in_flash("cpu") _wdc65c02[256] = {
   /* 0_ */ {brk, imp, 7}, {ora, xin, 6},    ldd_imm   ,    unnop11   , {tsb,  zp, 5}, {ora,  zp, 3}, {asl,  zp, 5}, {rmb0, zp, 5}, {php, imp, 3}, {ora, imm, 2}, {asl, acc, 2},    unnop11   , {tsb,  ab, 6}, {ora,  ab, 4}, {asl,  ab, 6}, {bbr0, zp, 5},
   /* 1_ */ {bpl, rel, 2}, {ora, yip, 5}, {ora, zpi, 5},    unnop11   , {trb,  zp, 5}, {ora, zpx, 4}, {asl, zpx, 6}, {rmb1, zp, 5}, {clc, imp, 2}, {ora, ayp, 4}, {inc, acc, 2},    unnop11   , {trb,  ab, 6}, {ora, axp, 4}, {asl, axp, 6}, {bbr1, zp, 5},
   /* 2_ */ {jsr,  ab, 6}, { and, xin, 6},    ldd_imm   ,    unnop11   , {bit,  zp, 3}, { and,  zp, 3}, {rol,  zp, 5}, {rmb2, zp, 5}, {plp, imp, 4}, { and, imm, 2}, {rol, acc, 2},    unnop11   , {bit,  ab, 4}, { and,  ab, 4}, {rol,  ab, 6}, {bbr2, zp, 5},
-  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6}, {rmb3, zp, 5}, {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, abx, 4}, { and, axp, 4}, {rol, axp, 6}, {bbr3, zp, 5},
+  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6}, {rmb3, zp, 5}, {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, axp, 4}, { and, axp, 4}, {rol, axp, 6}, {bbr3, zp, 5},
   /* 4_ */ {rti, imp, 6}, {eor, xin, 6},    ldd_imm   ,    unnop11   , {ldd,  zp, 3}, {eor,  zp, 3}, {lsr,  zp, 5}, {rmb4, zp, 5}, {pha, imp, 3}, {eor, imm, 2}, {lsr, acc, 2},    unnop11   , {jmp,  ab, 3}, {eor,  ab, 4}, {lsr,  ab, 6}, {bbr4, zp, 5},
   /* 5_ */ {bvc, rel, 2}, {eor, yip, 5}, {eor, zpi, 5},    unnop11   , {ldd, zpx, 4}, {eor, zpx, 4}, {lsr, zpx, 6}, {rmb5, zp, 5}, {cli, imp, 2}, {eor, ayp, 4}, {phy, imp, 3},    unnop11   , {ldd,  ab, 8}, {eor, axp, 4}, {lsr, axp, 6}, {bbr5, zp, 5},
   /* 6_ */ {rts, imp, 6}, {adc, xin, 6},    ldd_imm   ,    unnop11   , {stz,  zp, 3}, {adc,  zp, 3}, {ror,  zp, 5}, {rmb6, zp, 5}, {pla, imp, 4}, {adc, imm, 2}, {ror, acc, 2},    unnop11   , {jmp, ind, 6}, {adc,  ab, 4}, {ror,  ab, 6}, {bbr6, zp, 5},
@@ -2700,7 +2704,7 @@ static const vrEmu6502Opcode _r65c02[256] = {
   /* 0_ */ {brk, imp, 7}, {ora, xin, 6},    ldd_imm   ,    unnop11   , {tsb,  zp, 5}, {ora,  zp, 3}, {asl,  zp, 5}, {rmb0, zp, 5}, {php, imp, 3}, {ora, imm, 2}, {asl, acc, 2},    unnop11   , {tsb,  ab, 6}, {ora,  ab, 4}, {asl,  ab, 6}, {bbr0, zp, 5},
   /* 1_ */ {bpl, rel, 2}, {ora, yip, 5}, {ora, zpi, 5},    unnop11   , {trb,  zp, 5}, {ora, zpx, 4}, {asl, zpx, 6}, {rmb1, zp, 5}, {clc, imp, 2}, {ora, ayp, 4}, {inc, acc, 2},    unnop11   , {trb,  ab, 6}, {ora, axp, 4}, {asl, axp, 6}, {bbr1, zp, 5},
   /* 2_ */ {jsr,  ab, 6}, { and, xin, 6},    ldd_imm   ,    unnop11   , {bit,  zp, 3}, { and,  zp, 3}, {rol,  zp, 5}, {rmb2, zp, 5}, {plp, imp, 4}, { and, imm, 2}, {rol, acc, 2},    unnop11   , {bit,  ab, 4}, { and,  ab, 4}, {rol,  ab, 6}, {bbr2, zp, 5},
-  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6}, {rmb3, zp, 5}, {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, abx, 4}, { and, axp, 4}, {rol, axp, 6}, {bbr3, zp, 5},
+  /* 3_ */ {bmi, rel, 2}, { and, yip, 5}, { and, zpi, 5},    unnop11   , {bit, zpx, 4}, { and, zpx, 4}, {rol, zpx, 6}, {rmb3, zp, 5}, {sec, imp, 2}, { and, ayp, 4}, {dec, acc, 2},    unnop11   , {bit, axp, 4}, { and, axp, 4}, {rol, axp, 6}, {bbr3, zp, 5},
   /* 4_ */ {rti, imp, 6}, {eor, xin, 6},    ldd_imm   ,    unnop11   , {ldd,  zp, 3}, {eor,  zp, 3}, {lsr,  zp, 5}, {rmb4, zp, 5}, {pha, imp, 3}, {eor, imm, 2}, {lsr, acc, 2},    unnop11   , {jmp,  ab, 3}, {eor,  ab, 4}, {lsr,  ab, 6}, {bbr4, zp, 5},
   /* 5_ */ {bvc, rel, 2}, {eor, yip, 5}, {eor, zpi, 5},    unnop11   , {ldd, zpx, 4}, {eor, zpx, 4}, {lsr, zpx, 6}, {rmb5, zp, 5}, {cli, imp, 2}, {eor, ayp, 4}, {phy, imp, 3},    unnop11   , {ldd,  ab, 8}, {eor, axp, 4}, {lsr, axp, 6}, {bbr5, zp, 5},
   /* 6_ */ {rts, imp, 6}, {adc, xin, 6},    ldd_imm   ,    unnop11   , {stz,  zp, 3}, {adc,  zp, 3}, {ror,  zp, 5}, {rmb6, zp, 5}, {pla, imp, 4}, {adc, imm, 2}, {ror, acc, 2},    unnop11   , {jmp, ind, 6}, {adc,  ab, 4}, {ror,  ab, 6}, {bbr6, zp, 5},
