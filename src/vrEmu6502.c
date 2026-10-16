@@ -347,6 +347,19 @@ VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
       vr6502->addrModes[i] = opcodeToAddrMode(vr6502, i & 0xff);
     }
 
+    /* backplane patch: fixed power-up state.  On silicon power-up leaves
+       the registers undefined, and upstream left them as malloc returned
+       them.  Start from A, X, Y, S and PC at 0 and P at $24 (I set, bit 5
+       set) so a machine runs the same way every time; the reset sequence
+       below then reads the stack from S = 0 and leaves S at $FD. */
+    vr6502->pc = 0;
+    vr6502->ac = 0;
+    vr6502->ix = 0;
+    vr6502->iy = 0;
+    vr6502->sp = 0;
+    vr6502->flags = FlagI | FlagU;
+    vr6502->currentOpcodeAddr = 0;
+
     vrEmu6502Reset(vr6502);
   }
 
@@ -377,7 +390,6 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502Reset(VrEmu6502* vr6502)
     /* initialization */
     vr6502->intPin = IntCleared;
     vr6502->nmiPin = IntCleared;
-    vr6502->pc = read16(vr6502, RESET_VEC);
     vr6502->step = 0;
     vr6502->wai = false;
     vr6502->stp = false;
@@ -385,20 +397,43 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502Reset(VrEmu6502* vr6502)
     vr6502->tmpAddr = 0;
     vr6502->immPending = false;   /* backplane patch */
 
-    /* 65c02 clears D and sets I on reset */
+    /* backplane patch: the reset sequence.  It has the seven cycles of an
+       interrupt entry with reads in place of the three stack writes: two
+       reads of PC, reads at S, S-1 and S-2 that leave S lowered by 3, and
+       the vector.  The accesses happen here, inside the reset operation,
+       and count no cycles.  Upstream read only the vector and left S as it
+       was. */
+    vr6502->readFn(vr6502->pc, false, vr6502->userData);
+    vr6502->readFn(vr6502->pc, false, vr6502->userData);
+    for (int i = 0; i < 3; ++i)
+    {
+      vr6502->readFn(vr6502->spBase | vr6502->sp--, false, vr6502->userData);
+    }
+    vr6502->pc = read16(vr6502, RESET_VEC);
+
+    /* backplane patch: reset sets I on every model (upstream set it on the
+       65C02 only); the 65C02 also clears D, the NMOS part leaves it. */
     if (is65c02(vr6502))
     {
       vr6502->flags &= ~FlagD;
-      vr6502->flags |= FlagI;
     }
+    vr6502->flags |= FlagI;
 
-    /* B and U don't exist so always 1's */
-    vr6502->flags |= FlagU | FlagB;
+    /* backplane patch: bit 5 reads as 1.  P holds no B flag (upstream set
+       it here), so P is $24 after the power-up reset; bit 4 exists only in
+       the pushed copy of P. */
+    vr6502->flags |= FlagU;
   }
 }
 
 static void beginInterrupt(VrEmu6502* vr6502, uint16_t addr)
 {
+  /* backplane patch: the first two cycles of an IRQ or NMI entry read PC
+     and discard the byte; PC does not advance, so the pushed address is
+     the next instruction's.  Both reads go to readFn. */
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
+
   push(vr6502, vr6502->pc >> 8);
   push(vr6502, vr6502->pc & 0xff);
   push(vr6502, (vr6502->flags | FlagU) & ~FlagB);
@@ -605,7 +640,9 @@ VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetStatus(VrEmu6502* vr6502)
  */
 VR_EMU_6502_DLLEXPORT void vrEmu6502SetStatus(VrEmu6502* vr6502, uint8_t val)
 {
-  vr6502->flags = val;
+  /* backplane patch: P holds no B flag; a write ignores bits 4 and 5 of
+     the byte, so bit 4 reads 0 and bit 5 reads 1. */
+  vr6502->flags = (val & ~FlagB) | FlagU;
 }
 
 /* ------------------------------------------------------------------
@@ -1743,7 +1780,9 @@ static void plp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   readPcDummy(vr6502);   /* backplane patch */
   readStackDummy(vr6502);
 
-  vr6502->flags = pop(vr6502) | FlagU | FlagB;
+  /* backplane patch: P holds no B flag; bit 4 reads 0 and bit 5 reads 1,
+     whatever the pulled byte holds.  Upstream set B here. */
+  vr6502->flags = (pop(vr6502) & ~FlagB) | FlagU;
 }
 
 /*
@@ -1837,7 +1876,7 @@ static void rti(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   readPcDummy(vr6502);   /* backplane patch */
   readStackDummy(vr6502);
 
-  vr6502->flags = pop(vr6502) | FlagU | FlagB;
+  vr6502->flags = (pop(vr6502) & ~FlagB) | FlagU;   /* backplane patch: no B, as plp */
   vr6502->pc = pop(vr6502);
   vr6502->pc |= pop(vr6502) << 8;
 }
