@@ -528,6 +528,34 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStackPointer(VrEmu6502* vr6502, uint8_t v
 
 /* ------------------------------------------------------------------
  *
+ * get / set the WAI (wait-for-interrupt) latch
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetWai(VrEmu6502* vr6502)
+{
+  return vr6502->wai;
+}
+
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetWai(VrEmu6502* vr6502, bool val)
+{
+  vr6502->wai = val;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * get / set the STP (stop-the-clock) latch
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetStp(VrEmu6502* vr6502)
+{
+  return vr6502->stp;
+}
+
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val)
+{
+  vr6502->stp = val;
+}
+
+/* ------------------------------------------------------------------
+ *
  * return the current opcode
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetCurrentOpcode(VrEmu6502* vr6502)

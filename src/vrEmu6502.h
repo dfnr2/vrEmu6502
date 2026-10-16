@@ -238,6 +238,25 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStackPointer(VrEmu6502* vr6502, uint8_t v
 
 /* ------------------------------------------------------------------
  *
+ * get / set the WAI (wait-for-interrupt) latch.  Set by the WAI
+ * instruction; cleared when an asserted IRQ or NMI is observed.
+ * Required so that snapshot / fork can round-trip a CPU that is
+ * currently waiting.
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetWai(VrEmu6502* vr6502);
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetWai(VrEmu6502* vr6502, bool val);
+
+/* ------------------------------------------------------------------
+ *
+ * get / set the STP (stop-the-clock) latch.  Set by the STP
+ * instruction; only cleared by a hardware reset.  Required so that
+ * snapshot / fork can round-trip a CPU that has stopped.
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetStp(VrEmu6502* vr6502);
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val);
+
+/* ------------------------------------------------------------------
+ *
  * return the current opcode
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetCurrentOpcode(VrEmu6502* vr6502);
