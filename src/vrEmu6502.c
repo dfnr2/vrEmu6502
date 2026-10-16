@@ -1691,15 +1691,11 @@ static void nop(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr)
   {
-    uint16_t addr = modeAddr(vr6502);
-
-    /* backplane patch: the undocumented NMOS two-byte NOPs pair nop with imm.
-       imm() only marks the byte at PC; consume it here so the operand really
-       is read, as it is on hardware, and reaches fetchFn.  A pending mark is
-       the mode saying it handed out an instruction-stream byte, so no other
-       NOP mode gains a read.  Non-immediate modes already fetched their
-       operand words inside the mode helper. */
-    if (vr6502->immPending) readData(vr6502, addr);
+    /* backplane patch: an undocumented NMOS NOP with an operand reads its
+       effective address, as a load does, and a device register there sees
+       the read.  For the immediate NOPs, imm() only marked the byte at PC;
+       readData consumes the mark, so that read reaches fetchFn. */
+    readData(vr6502, modeAddr(vr6502));
   }
   else if (vr6502->step != 1)
   {
@@ -2278,11 +2274,32 @@ static void wai(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
- * invalid opcode (not supported by this emulator)
+ * stop at an opcode, as JAM does (backplane patch)
+ *
+ * The opcode fetch is the only access.  The stop latch is set and PC is
+ * put back at the opcode's address, so the stopped core reports the
+ * instruction that stopped it.  Only a reset clears the latch.
+ */
+inline static void stopAtOpcode(VrEmu6502* vr6502)
+{
+  vr6502->stp = true;
+  vr6502->pc = vr6502->currentOpcodeAddr;
+}
+
+/*
+ * undocumented opcode on CPU_6502 (backplane patch: stops the core)
+ *
+ * The CPU_6502 model runs only the documented opcodes.  Upstream ran the
+ * rest as one-byte NOPs, so a program that strayed into one carried on
+ * from the wrong address.  Stopping there, as at JAM, finds a program's
+ * accidental use of an undocumented opcode at the instruction that used
+ * it; a program that uses them on purpose runs on CPU_6502U.
  */
 static void err(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  if (modeAddr) modeAddr(vr6502);
+  (void)modeAddr;
+
+  stopAtOpcode(vr6502);
 }
 
 /* ------------------------------------------------------------------
@@ -2390,7 +2407,10 @@ static void anc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void alr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   and (vr6502, modeAddr);
-  lsr(vr6502, acc);
+  /* backplane patch: shift the accumulator through lsrValue.  lsr(acc)
+     is LSR A, which makes the implied instruction's read of the byte at
+     PC; ALR's operand was its last access. */
+  vr6502->ac = lsrValue(vr6502, vr6502->ac);
 }
 
 /*
@@ -2398,9 +2418,42 @@ static void alr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void arr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  and (vr6502, modeAddr);
-  setOrClearBit(vr6502, FlagV, ((bool)vr6502->ac & 0x80) ^ ((bool)vr6502->ac & 0x40));
-  vr6502->ac = (vr6502->ac >> 1) | (testBit(vr6502, FlagC) * 0x80);
+  /* backplane patch: the NMOS behavior ("NMOS 6510 Unintended Opcodes",
+     64doc).  The AND result rotates right with C shifted in.  In binary
+     mode N and Z describe the result, C is its bit 6, and V is bit 6 XOR
+     bit 5.  In decimal mode N is the old C, Z and V come from the rotated
+     value, each digit is adjusted as ADC would, and C is set by the high
+     digit's adjustment.  Upstream computed V, C, N and Z wrongly and
+     ignored D. */
+  uint8_t t = vr6502->ac & readData(vr6502, modeAddr(vr6502));
+  bool c = testBit(vr6502, FlagC);
+  uint8_t result = (t >> 1) | (c ? 0x80 : 0x00);
+
+  if (!testBit(vr6502, FlagD))
+  {
+    setNZ(vr6502, result);
+    setOrClearBit(vr6502, FlagC, result & 0x40);
+    setOrClearBit(vr6502, FlagV, ((result >> 6) ^ (result >> 5)) & 0x01);
+    vr6502->ac = result;
+    return;
+  }
+
+  uint8_t ah = t >> 4;
+  uint8_t al = t & 0x0f;
+  setOrClearBit(vr6502, FlagN, c);
+  setOrClearBit(vr6502, FlagZ, result == 0);
+  setOrClearBit(vr6502, FlagV, (t ^ result) & 0x40);
+  if (al + (al & 0x01) > 5)
+  {
+    result = (result & 0xf0) | ((result + 6) & 0x0f);
+  }
+  bool carry = ah + (ah & 0x01) > 5;
+  setOrClearBit(vr6502, FlagC, carry);
+  if (carry)
+  {
+    result += 0x60;
+  }
+  vr6502->ac = result;
 }
 
 /*
@@ -2425,40 +2478,58 @@ static void las(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
- * store bitwise-and of accumulator, x and ((high byte of addr) + 1)
+ * the store of SHA, SHX, SHY and TAS (backplane patch)
+ *
+ * The value stored is the register ANDed with the base address's high byte
+ * plus one.  When the index carries into the high byte, the address written
+ * takes that value as its high byte.  This is the behavior with no DMA or
+ * RDY stall in the instruction; on silicon a stall changes it.  Upstream
+ * took the high byte of the indexed address, and wrote to the indexed
+ * address on a page cross.
+ */
+static void shStore(VrEmu6502* vr6502, uint16_t addr, uint8_t index, uint8_t reg)
+{
+  uint16_t base = addr - index;
+  uint8_t val = reg & (uint8_t)((base >> 8) + 1);
+  if ((base ^ addr) & 0xff00)
+  {
+    addr = (uint16_t)((val << 8) | (addr & 0x00ff));
+  }
+  vr6502->writeFn(addr, val, vr6502->userData);
+}
+
+/*
+ * store bitwise-and of accumulator, x and ((high byte of base) + 1)
  */
 static void sha(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  uint16_t addr = modeAddr(vr6502);
-  vr6502->writeFn(addr, vr6502->ac & vr6502->ix & (uint8_t)((addr >> 8) + 1), vr6502->userData);
+  shStore(vr6502, modeAddr(vr6502), vr6502->iy, vr6502->ac & vr6502->ix);   /* backplane patch */
 }
 
 /*
- * store bitwise-and of x and ((high byte of addr) + 1)
+ * store bitwise-and of x and ((high byte of base) + 1)
  */
 static void shx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  uint16_t addr = modeAddr(vr6502);
-  vr6502->writeFn(addr, vr6502->ix & (uint8_t)((addr >> 8) + 1), vr6502->userData);
+  shStore(vr6502, modeAddr(vr6502), vr6502->iy, vr6502->ix);   /* backplane patch */
 }
 
 /*
- * store bitwise-and of y and ((high byte of addr) + 1)
+ * store bitwise-and of y and ((high byte of base) + 1)
  */
 static void shy(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  uint16_t addr = modeAddr(vr6502);
-  vr6502->writeFn(addr, vr6502->iy & (uint8_t)((addr >> 8) + 1), vr6502->userData);
+  shStore(vr6502, modeAddr(vr6502), vr6502->ix, vr6502->iy);   /* backplane patch */
 }
 
 /*
- * store bitwise-and of y and ((high byte of addr) + 1)
+ * transfer a and x to sp, store bitwise-and of sp and ((high byte of base) + 1)
  */
 static void tas(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   uint16_t addr = modeAddr(vr6502);
   vr6502->sp = vr6502->ac & vr6502->ix;
-  vr6502->writeFn(addr, vr6502->sp & (uint8_t)((addr >> 8) + 1), vr6502->userData);
+  shStore(vr6502, addr, vr6502->iy, vr6502->sp);   /* backplane patch */
 }
 
 /*
@@ -2479,6 +2550,8 @@ static void lxa(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   vr6502->ac = (vr6502->ac | UNSTABLE_MAGIC_CONST);
   vr6502->ac &= readData(vr6502, modeAddr(vr6502));
+  /* backplane patch: LXA loads X as well as A; upstream left X alone */
+  vr6502->ix = vr6502->ac;
   setNZ(vr6502, vr6502->ac);
 }
 
@@ -2489,15 +2562,16 @@ static void jam(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
 
-  readData(vr6502, imm(vr6502));
-  vr6502->stp = true;
+  /* backplane patch: JAM makes only its opcode fetch and stops with PC at
+     its own address.  Upstream read a second byte and left PC past it. */
+  stopAtOpcode(vr6502);
 }
 
 /* ------------------------------------------------------------------
  *  OPCODE TABLES
  * ----------------------------------------------------------------*/
 
-#define invalid { err, imp, 2 }
+#define invalid { err, imp, 1 }   /* backplane patch: stops, as kil */
 #define unnop11 { nop, imp, 1 }
 #define ldd_imm { ldd, imm, 2 }
 #define kil     { jam, imp, 1 }
@@ -2533,7 +2607,7 @@ static const vrEmu6502Opcode _std6502U[256] = {
   /* 6_ */ {rts, imp, 6}, {adc, xin, 6},      kil     , {rra, xin, 8}, {nop,  zp, 3}, {adc,  zp, 3}, {ror,  zp, 5}, {rra,  zp, 5}, {pla, imp, 4}, {adc, imm, 2}, {ror, acc, 2}, {arr, imm, 2}, {jmp, ind, 5}, {adc,  ab, 4}, {ror,  ab, 6}, {rra,  ab, 6},
   /* 7_ */ {bvs, rel, 2}, {adc, yip, 5},      kil     , {rra, yin, 8}, {nop, zpx, 4}, {adc, zpx, 4}, {ror, zpx, 6}, {rra, zpx, 6}, {sei, imp, 2}, {adc, ayp, 4}, {nop, imp, 2}, {rra, aby, 7}, {nop, axp, 4}, {adc, axp, 4}, {ror, abx, 7}, {rra, abx, 7},
   /* 8_ */ {nop, imm, 2}, {sta, xin, 6}, {nop, imm, 2}, {sax, xin, 6}, {sty,  zp, 3}, {sta,  zp, 3}, {stx,  zp, 3}, {sax,  zp, 3}, {dey, imp, 2}, {nop, imm, 2}, {txa, imp, 2}, {ane, imm, 2}, {sty,  ab, 4}, {sta,  ab, 4}, {stx,  ab, 4}, {sax,  ab, 4},
-  /* 9_ */ {bcc, rel, 2}, {sta, yin, 6},      kil     , {sha, zpy, 6}, {sty, zpx, 4}, {sta, zpx, 4}, {stx, zpy, 4}, {sax, zpy, 4}, {tya, imp, 2}, {sta, aby, 5}, {txs, imp, 2}, {tas, aby, 5}, {shy, abx, 5}, {sta, abx, 5}, {shx, aby, 5}, {sha, aby, 5},
+  /* 9_ */ {bcc, rel, 2}, {sta, yin, 6},      kil     , {sha, yin, 6}, {sty, zpx, 4}, {sta, zpx, 4}, {stx, zpy, 4}, {sax, zpy, 4}, {tya, imp, 2}, {sta, aby, 5}, {txs, imp, 2}, {tas, aby, 5}, {shy, abx, 5}, {sta, abx, 5}, {shx, aby, 5}, {sha, aby, 5},
   /* A_ */ {ldy, imm, 2}, {lda, xin, 6}, {ldx, imm, 2}, {lax, xin, 6}, {ldy,  zp, 3}, {lda,  zp, 3}, {ldx,  zp, 3}, {lax,  zp, 3}, {tay, imp, 2}, {lda, imm, 2}, {tax, imp, 2}, {lxa, imm, 2}, {ldy,  ab, 4}, {lda,  ab, 4}, {ldx,  ab, 4}, {lax,  ab, 4},
   /* B_ */ {bcs, rel, 2}, {lda, yip, 5},      kil     , {lax, yip, 5}, {ldy, zpx, 4}, {lda, zpx, 4}, {ldx, zpy, 4}, {lax, zpy, 4}, {clv, imp, 2}, {lda, ayp, 4}, {tsx, imp, 2}, {las, ayp, 4}, {ldy, axp, 4}, {lda, axp, 4}, {ldx, ayp, 4}, {lax, ayp, 4},
   /* C_ */ {cpy, imm, 2}, {cmp, xin, 6}, {nop, imm, 2}, {dcp, xin, 8}, {cpy,  zp, 3}, {cmp,  zp, 3}, {dec,  zp, 5}, {dcp,  zp, 5}, {iny, imp, 2}, {cmp, imm, 2}, {dex, imp, 2}, {sbx, imm, 2}, {cpy,  ab, 4}, {cmp,  ab, 4}, {dec,  ab, 6}, {dcp,  ab, 6},
