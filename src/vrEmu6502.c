@@ -465,6 +465,33 @@ VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetY(VrEmu6502* vr6502)
 
 /* ------------------------------------------------------------------
  *
+ * set the accumulator
+ */
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetAcc(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->ac = val;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * set the x index register
+ */
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetX(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->ix = val;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * set the y index register
+ */
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetY(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->iy = val;
+}
+
+/* ------------------------------------------------------------------
+ *
  * return the processor status register
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetStatus(VrEmu6502* vr6502)
@@ -474,11 +501,29 @@ VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetStatus(VrEmu6502* vr6502)
 
 /* ------------------------------------------------------------------
  *
+ * set the processor status register
+ */
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetStatus(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->flags = val;
+}
+
+/* ------------------------------------------------------------------
+ *
  * return the stack pointer register
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetStackPointer(VrEmu6502* vr6502)
 {
   return vr6502->sp;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * set the stack pointer register
+ */
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetStackPointer(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->sp = val;
 }
 
 /* ------------------------------------------------------------------
