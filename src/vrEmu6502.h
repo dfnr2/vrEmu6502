@@ -272,6 +272,18 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val);
 
 /* ------------------------------------------------------------------
  *
+ * get / set the I value the next interrupt check tests.  CLI, SEI and
+ * PLP change I in their last cycle, after the hardware has sampled IRQ,
+ * so the check after one of them tests I as it stood before the
+ * instruction; after any other instruction it tests the present I.
+ * vrEmu6502SetStatus sets it to the I it writes.  Required so that
+ * snapshot / fork resumes with the same delay.
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetIrqMask(VrEmu6502* vr6502);
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetIrqMask(VrEmu6502* vr6502, bool val);
+
+/* ------------------------------------------------------------------
+ *
  * get / set the current opcode.  Read by `vrEmu6502Tick` at
  * instruction boundaries to suppress interrupt servicing for one
  * instruction after a 1-cycle NOP (`unnop11`).  Required so that

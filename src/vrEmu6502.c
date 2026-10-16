@@ -69,6 +69,13 @@ struct vrEmu6502_s
   bool wai;
   bool stp;
 
+  /* backplane patch: the I value the next interrupt check tests.  The
+     hardware samples IRQ before an instruction's last cycle, and CLI, SEI
+     and PLP change I in that cycle, so after one of them the check sees I
+     as it stood before the instruction.  After any other instruction it
+     equals I. */
+  bool irqMask;
+
   uint16_t pc;
 
   uint8_t  ac;
@@ -358,6 +365,7 @@ VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
     vr6502->iy = 0;
     vr6502->sp = 0;
     vr6502->flags = FlagI | FlagU;
+    vr6502->irqMask = true;
     vr6502->currentOpcodeAddr = 0;
 
     vrEmu6502Reset(vr6502);
@@ -418,6 +426,7 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502Reset(VrEmu6502* vr6502)
       vr6502->flags &= ~FlagD;
     }
     vr6502->flags |= FlagI;
+    vr6502->irqMask = true;   /* backplane patch: the check sees I set */
 
     /* backplane patch: bit 5 reads as 1.  P holds no B flag (upstream set
        it here), so P is $24 after the power-up reset; bit 4 exists only in
@@ -438,6 +447,14 @@ static void beginInterrupt(VrEmu6502* vr6502, uint16_t addr)
   push(vr6502, vr6502->pc & 0xff);
   push(vr6502, (vr6502->flags | FlagU) & ~FlagB);
   setBit(vr6502, FlagI);
+  vr6502->irqMask = true;   /* backplane patch: the check sees I set */
+
+  /* backplane patch: the 65C02 clears D on interrupt entry, as its BRK
+     does, so the handler starts in binary mode.  The NMOS part leaves D. */
+  if (is65c02(vr6502))
+  {
+    clearBit(vr6502, FlagD);
+  }
   vr6502->wai = false;
   vr6502->pc = read16(vr6502, addr);
 }
@@ -476,7 +493,7 @@ VR_EMU_6502_DLLEXPORT void __time_critical_func(vrEmu6502Tick)(VrEmu6502* vr6502
       if (vr6502->intPin == IntRequested)
       {
         vr6502->wai = false;
-        if (!testBit(vr6502, FlagI))
+        if (!vr6502->irqMask)   /* backplane patch: the delayed I */
         {
           beginInterrupt(vr6502, INT_VEC);
           vr6502->step = 6; /* backplane patch: 7-cycle interrupt sequence */
@@ -501,6 +518,12 @@ VR_EMU_6502_DLLEXPORT void __time_critical_func(vrEmu6502Tick)(VrEmu6502* vr6502
 
       /* set cycles here as they may be adjusted by addressing mode */
       vr6502->step = opcode->cycles;
+
+      /* backplane patch: the next interrupt check tests I as it stands
+         before this instruction.  Only CLI, SEI, PLP, BRK and RTI change
+         I.  CLI, SEI and PLP leave this value, so the check after them
+         sees the old I; BRK and RTI set irqMask to the I they leave. */
+      vr6502->irqMask = testBit(vr6502, FlagI);
 
       /* execute the instruction */
       opcode->instruction(vr6502, opcode->addrMode);
@@ -643,6 +666,8 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStatus(VrEmu6502* vr6502, uint8_t val)
   /* backplane patch: P holds no B flag; a write ignores bits 4 and 5 of
      the byte, so bit 4 reads 0 and bit 5 reads 1. */
   vr6502->flags = (val & ~FlagB) | FlagU;
+  /* backplane patch: a host write of P takes effect at the next check */
+  vr6502->irqMask = (val & FlagI) != 0;
 }
 
 /* ------------------------------------------------------------------
@@ -689,6 +714,20 @@ VR_EMU_6502_DLLEXPORT bool vrEmu6502GetStp(VrEmu6502* vr6502)
 VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val)
 {
   vr6502->stp = val;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * get / set the I value the next interrupt check tests (backplane patch)
+ */
+VR_EMU_6502_DLLEXPORT bool vrEmu6502GetIrqMask(VrEmu6502* vr6502)
+{
+  return vr6502->irqMask;
+}
+
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetIrqMask(VrEmu6502* vr6502, bool val)
+{
+  vr6502->irqMask = val;
 }
 
 /* ------------------------------------------------------------------
@@ -1404,6 +1443,7 @@ static void brk(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   push(vr6502, (vr6502->pc) & 0xff);
   push(vr6502, vr6502->flags | FlagU | FlagB);
   setBit(vr6502, FlagI);
+  vr6502->irqMask = true;   /* backplane patch: the check sees the present I */
 
   if (is65c02(vr6502))
   {
@@ -1888,6 +1928,7 @@ static void rti(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   readStackDummy(vr6502);
 
   vr6502->flags = (pop(vr6502) & ~FlagB) | FlagU;   /* backplane patch: no B, as plp */
+  vr6502->irqMask = testBit(vr6502, FlagI);   /* backplane patch: the present I */
   vr6502->pc = pop(vr6502);
   vr6502->pc |= pop(vr6502) << 8;
 }
