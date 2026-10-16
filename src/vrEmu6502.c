@@ -388,6 +388,14 @@ VR_EMU_6502_DLLEXPORT void __time_critical_func(vrEmu6502Tick)(VrEmu6502* vr6502
         vr6502->wai = false;
         vr6502->nmiPin = IntCleared;
         beginInterrupt(vr6502, NMI_VEC);
+        /* backplane patch: assign 7 cycles to the interrupt sequence.
+           beginInterrupt leaves `step` at 0, so InstCycle would report
+           step+1 = 1 for a hardware interrupt entry.  Set step here (on
+           the early-return path, so the trailing `--step` is skipped) so
+           InstCycle returns 7, the real IRQ/NMI sequence length.  Not set
+           in beginInterrupt itself: BRK reaches it after the opcode table
+           already set step=7 and then falls through to `--step`. */
+        vr6502->step = 6;
         return;
       }
 
@@ -398,6 +406,7 @@ VR_EMU_6502_DLLEXPORT void __time_critical_func(vrEmu6502Tick)(VrEmu6502* vr6502
         if (!testBit(vr6502, FlagI))
         {
           beginInterrupt(vr6502, INT_VEC);
+          vr6502->step = 6; /* backplane patch: 7-cycle interrupt sequence */
           return;
         }
       }
