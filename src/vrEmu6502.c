@@ -117,6 +117,10 @@ inline static uint16_t read16(VrEmu6502* vr6502, uint16_t addr)
 
 /*
  * read a 16-bit value from memory (with 6502 page crossing bug)
+ *
+ * The NMOS parts never carry the increment out of the low byte here, so a
+ * pointer ending at $xxff takes its high byte from $xx00 rather than the
+ * next page.  Only ind() dereferences a pointer this way.
  */
 inline static uint16_t read16Bug(VrEmu6502* vr6502, uint16_t addr)
 {
@@ -837,10 +841,13 @@ static uint16_t ind(VrEmu6502* vr6502)
 {
   if (vr6502->model == CPU_6502)
   {
-    /* 6502 had a bug if the low byte was $ff, the high address would come from
-       the same page rather than the next page */
-    uint16_t addr = read16Bug(vr6502, vr6502->pc++);
-    return read16(vr6502, addr);
+    /* backplane patch: the bug is in the dereference, not the operand fetch.
+       The operand word at PC is read normally and may cross a page; it is the
+       pointer whose high byte comes from the same page when its low byte is
+       $ff, so JMP ($20ff) takes $20ff and $2000.  Upstream applied the wrap
+       to the read at PC instead. */
+    uint16_t addr = read16(vr6502, vr6502->pc++);
+    return read16Bug(vr6502, addr);
   }
 
   uint16_t addr = read16(vr6502, vr6502->pc++);
