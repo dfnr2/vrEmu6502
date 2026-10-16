@@ -1169,56 +1169,69 @@ static uint16_t zpy(VrEmu6502* vr6502)
    *  INSTRUCTIONS
    * ----------------------------------------------------------------*/
 
+/*
+ * the access of the 65C02's decimal-mode cycle (backplane patch)
+ *
+ * A 65C02 ADC or SBC with D set takes one more cycle.  With a memory
+ * operand the cycle reads the effective address a second time.  With an
+ * immediate operand it makes no access here: the silicon reads a fixed
+ * address in that cycle, and the SingleStepTests traces of the three
+ * 65C02 parts disagree on which.  The NMOS part has no such cycle.
+ */
+inline static void decimalCycleRead(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, uint16_t addr)
+{
+  if (testBit(vr6502, FlagD) && is65c02(vr6502) && modeAddr != imm)
+  {
+    vr6502->readFn(addr, false, vr6502->userData);
+  }
+}
+
    /*
     * add with carry (deicmal mode)
     */
 static void adcd(VrEmu6502* vr6502, uint8_t value)
 {
-  uint8_t vu = value & 0x0f;
-  uint8_t vt = (value & 0xf0) >> 4;
+  /* backplane patch: the sequences of Bruce Clark's "Decimal Mode"
+     tutorial (6502.org), which also fix the result for digits above 9.
+     Upstream never wrote V on NMOS and took N from the adjusted result.
+     The arithmetic is on int, wider than a byte, as the tutorial's is. */
+  int a = vr6502->ac;
+  int m = value;
+  int c = testBit(vr6502, FlagC);
 
-  uint8_t au = vr6502->ac & 0x0f;
-  uint8_t at = (vr6502->ac & 0xf0) >> 4;
-
-  uint8_t units = vu + au + testBit(vr6502, FlagC);
-  uint8_t tens = vt + at;
-
-  uint8_t tc = 0;
-
-  if (units > 0x09)
+  /* sequence 1: the accumulator and C, every model */
+  int lo = (a & 0x0f) + (m & 0x0f) + c;
+  if (lo >= 0x0a)
   {
-    tc = 1;
-    tens += 0x01;
-    units += 0x06;
+    lo = ((lo + 0x06) & 0x0f) + 0x10;
   }
-  if (tens > 0x09)
+  int s = (a & 0xf0) + (m & 0xf0) + lo;
+  if (s >= 0xa0)
   {
-    tens += 0x06;
+    s += 0x60;
   }
 
-  /* 65c02 takes one extra cycle in decimal mode */
+  /* sequence 2: N on NMOS and V on every model, from the high digits taken
+     as signed bytes */
+  int sv = (int8_t)(a & 0xf0) + (int8_t)(m & 0xf0) + lo;
+  setOrClearBit(vr6502, FlagV, sv < -128 || sv > 127);
+
+  vr6502->ac = (uint8_t)s;
+  setOrClearBit(vr6502, FlagC, s >= 0x100);
+
   if (is65c02(vr6502))
   {
+    /* 65c02 takes one extra cycle in decimal mode, and its N and Z
+       describe the accumulator */
     ++vr6502->step;
-
-    /* set V flag */
-    if (at & 0x08) at |= 0xf0;
-    if (vt & 0x08) vt |= 0xf0;
-
-    int8_t res = (int8_t)(at + vt + tc);
-
-    setOrClearBit(vr6502, FlagV, res < -8 || res > 7);
-
-    setNZ(vr6502, vr6502->ac = (tens << 4) | (units & 0x0f));
+    setNZ(vr6502, vr6502->ac);
   }
   else
   {
-    uint16_t binResult = vr6502->ac + value + testBit(vr6502, FlagC);
-    setNZ(vr6502, vr6502->ac = (tens << 4) | (units & 0x0f));
-    setOrClearBit(vr6502, FlagZ, (binResult & 0xff) == 0);
+    /* NMOS: N from sequence 2, Z from the binary sum */
+    setOrClearBit(vr6502, FlagN, sv & 0x80);
+    setOrClearBit(vr6502, FlagZ, ((a + m + c) & 0xff) == 0);
   }
-
-  setOrClearBit(vr6502, FlagC, tens & 0xf0);
 }
 
 /*
@@ -1247,7 +1260,9 @@ static void adcValue(VrEmu6502* vr6502, uint8_t opr)
  */
 static void adc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  adcValue(vr6502, readData(vr6502, modeAddr(vr6502)));
+  uint16_t addr = modeAddr(vr6502);
+  adcValue(vr6502, readData(vr6502, addr));
+  decimalCycleRead(vr6502, modeAddr, addr);   /* backplane patch */
 }
 
 /*
@@ -1904,53 +1919,51 @@ static void rts(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void sbcd(VrEmu6502* vr6502, uint8_t value)
 {
-  uint16_t binResult = vr6502->ac + ~value + testBit(vr6502, FlagC);
+  /* backplane patch: the sequences of Bruce Clark's "Decimal Mode"
+     tutorial (6502.org).  C and V are those of the binary subtraction on
+     every model; upstream computed the NMOS V from the adjusted result. */
+  int a = vr6502->ac;
+  int m = value;
+  int c = testBit(vr6502, FlagC);
 
-  uint16_t result = 0;
+  uint8_t opr = ~value;
+  uint16_t binResult = vr6502->ac + opr + c;
+  setOrClearBit(vr6502, FlagC, binResult > 0xff);
+  setOrClearBit(vr6502, FlagV, ((vr6502->ac ^ binResult) & (opr ^ binResult) & 0x80));
+
+  int lo = (a & 0x0f) - (m & 0x0f) + c - 1;
+  int d;
   if (vr6502->model == CPU_6502)
   {
-    uint16_t tmp = (vr6502->ac & 0x0f) - (value & 0x0f) - !testBit(vr6502, FlagC);
-
-    if (tmp & 0x8000)
+    /* sequence 3; N and Z as in binary mode */
+    if (lo < 0)
     {
-      tmp = ((tmp - 0x06) & 0x0f) - 0x10;
+      lo = ((lo - 0x06) & 0x0f) - 0x10;
     }
-
-    result = (vr6502->ac & 0xf0) - (value & 0xf0) + tmp;
-    if (result & 0x8000)
+    d = (a & 0xf0) - (m & 0xf0) + lo;
+    if (d < 0)
     {
-      result -= 0x60;
+      d -= 0x60;
     }
-
     setNZ(vr6502, (uint8_t)binResult);
-    setOrClearBit(vr6502, FlagV, (int16_t)result < -128 || (int16_t)result > 127);
   }
   else
   {
-    uint16_t tmp = (vr6502->ac & 0x0f) - (value & 0x0f) - !testBit(vr6502, FlagC);
-
-    result = vr6502->ac - value - !testBit(vr6502, FlagC);
-
-    if (result & 0x8000)
+    /* sequence 4; N and Z from the accumulator, one more cycle */
+    d = a - m + c - 1;
+    if (d < 0)
     {
-      result -= 0x60;
+      d -= 0x60;
     }
-    if (tmp & 0x8000)
+    if (lo < 0)
     {
-      result -= 0x06;
+      d -= 0x06;
     }
-
     ++vr6502->step;
-
-    /* set V flag */
-    setOrClearBit(vr6502, FlagV, ((vr6502->ac ^ binResult) & (~value ^ binResult) & 0x80));
-    setNZ(vr6502, (uint8_t)result);
+    setNZ(vr6502, (uint8_t)d);
   }
 
-
-  setOrClearBit(vr6502, FlagC, (uint16_t)result <= (uint16_t)vr6502->ac || (result & 0xff0) == 0xff0);
-
-  vr6502->ac = result & 0xff;
+  vr6502->ac = (uint8_t)d;
 }
 
 /*
@@ -1980,7 +1993,9 @@ static void sbcValue(VrEmu6502* vr6502, uint8_t value)
  */
 static void sbc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  sbcValue(vr6502, readData(vr6502, modeAddr(vr6502)));
+  uint16_t addr = modeAddr(vr6502);
+  sbcValue(vr6502, readData(vr6502, addr));
+  decimalCycleRead(vr6502, modeAddr, addr);   /* backplane patch */
 }
 
 /*
