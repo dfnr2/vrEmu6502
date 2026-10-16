@@ -258,6 +258,30 @@ inline static uint8_t rmwRead(VrEmu6502* vr6502, uint16_t addr)
   return val;
 }
 
+/*
+ * the second-cycle read of an instruction with no operand (backplane patch)
+ *
+ * An implied, accumulator or stack instruction reads the byte after its
+ * opcode in its second cycle and discards it; PC does not advance past it.
+ * The instruction does not consume the byte, so the read goes to readFn,
+ * not fetchFn.
+ */
+inline static void readPcDummy(VrEmu6502* vr6502)
+{
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
+}
+
+/*
+ * the stack read before a pull (backplane patch)
+ *
+ * PLA, PLP, PLX, PLY, RTS and RTI read the stack at S, before the pointer
+ * is incremented, in the cycle that increments it.
+ */
+inline static void readStackDummy(VrEmu6502* vr6502)
+{
+  vr6502->readFn(vr6502->spBase | vr6502->sp, false, vr6502->userData);
+}
+
 /* ------------------------------------------------------------------
  *  DECLARE OPCODE TABLES
  * ----------------------------------------------------------------*/
@@ -1210,6 +1234,7 @@ static void asl(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     vr6502->ac = aslValue(vr6502, vr6502->ac);
     return;
   }
@@ -1303,7 +1328,12 @@ static void brk(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
 
-  push(vr6502, (++vr6502->pc) >> 8);
+  /* backplane patch: BRK steps over the byte after its opcode, so the
+     second cycle's read is an instruction-stream byte and goes to fetchFn.
+     Upstream advanced PC without reading it. */
+  vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
+
+  push(vr6502, vr6502->pc >> 8);
   push(vr6502, (vr6502->pc) & 0xff);
   push(vr6502, vr6502->flags | FlagU | FlagB);
   setBit(vr6502, FlagI);
@@ -1338,6 +1368,7 @@ static void bvs(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void clc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   clearBit(vr6502, FlagC);
 }
@@ -1348,6 +1379,7 @@ static void clc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void cld(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   clearBit(vr6502, FlagD);
 }
@@ -1358,6 +1390,7 @@ static void cld(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void cli(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   clearBit(vr6502, FlagI);
 }
@@ -1368,6 +1401,7 @@ static void cli(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void clv(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   clearBit(vr6502, FlagV);
 }
@@ -1424,6 +1458,7 @@ static void dec(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     setNZ(vr6502, --vr6502->ac);
     return;
   }
@@ -1440,6 +1475,7 @@ static void dec(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void dex(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, --vr6502->ix);
 }
@@ -1450,6 +1486,7 @@ static void dex(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void dey(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, --vr6502->iy);
 }
@@ -1469,6 +1506,7 @@ static void inc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     setNZ(vr6502, ++vr6502->ac);
     return;
   }
@@ -1485,6 +1523,7 @@ static void inc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void inx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, ++vr6502->ix);
 }
@@ -1495,6 +1534,7 @@ static void inx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void iny(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, ++vr6502->iy);
 }
@@ -1512,10 +1552,18 @@ static void jmp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void jsr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  uint16_t addr = modeAddr(vr6502);
-  push(vr6502, --vr6502->pc >> 8);
+  /* backplane patch: the hardware fetches the target's high byte last,
+     after a read of the stack at S and the two pushes, so JSR fetches its
+     own operand rather than through ab().  The pushed address is that of
+     the high byte, the last byte of the JSR. */
+  (void)modeAddr;
+
+  uint16_t lo = vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
+  vr6502->readFn(vr6502->spBase | vr6502->sp, false, vr6502->userData);
+  push(vr6502, vr6502->pc >> 8);
   push(vr6502, vr6502->pc & 0xff);
-  vr6502->pc = addr;
+  uint16_t hi = vr6502->fetchFn(vr6502->pc, false, vr6502->userData);
+  vr6502->pc = lo | (hi << 8);
 }
 
 /*
@@ -1560,6 +1608,7 @@ static void lsr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     vr6502->ac = lsrValue(vr6502, vr6502->ac);
     return;
   }
@@ -1584,6 +1633,13 @@ static void nop(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
        NOP mode gains a read.  Non-immediate modes already fetched their
        operand words inside the mode helper. */
     if (vr6502->immPending) readData(vr6502, addr);
+  }
+  else if (vr6502->step != 1)
+  {
+    /* backplane patch: an implied NOP makes the second-cycle read.  The
+       65C02's one-cycle NOPs (unnop11) have no second cycle; step still
+       holds the opcode's cycle count here, so it tells them apart. */
+    readPcDummy(vr6502);
   }
 }
 
@@ -1613,6 +1669,7 @@ static void ora(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void pha(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   push(vr6502, vr6502->ac);
 }
@@ -1623,6 +1680,7 @@ static void pha(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void php(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   push(vr6502, vr6502->flags | FlagB | FlagU);
 }
@@ -1633,6 +1691,7 @@ static void php(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void phx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   push(vr6502, vr6502->ix);
 }
@@ -1643,6 +1702,7 @@ static void phx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void phy(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   push(vr6502, vr6502->iy);
 }
@@ -1653,6 +1713,8 @@ static void phy(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void pla(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   setNZ(vr6502, vr6502->ac = pop(vr6502));
 }
@@ -1663,6 +1725,8 @@ static void pla(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void plp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   vr6502->flags = pop(vr6502) | FlagU | FlagB;
 }
@@ -1673,6 +1737,8 @@ static void plp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void plx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   setNZ(vr6502, vr6502->ix = pop(vr6502));
 }
@@ -1683,6 +1749,8 @@ static void plx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void ply(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   setNZ(vr6502, vr6502->iy = pop(vr6502));
 }
@@ -1707,6 +1775,7 @@ static void rol(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     vr6502->ac = rolValue(vr6502, vr6502->ac);
     return;
   }
@@ -1735,6 +1804,7 @@ static void ror(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
+    readPcDummy(vr6502);   /* backplane patch */
     vr6502->ac = rorValue(vr6502, vr6502->ac);
     return;
   }
@@ -1749,6 +1819,8 @@ static void ror(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void rti(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   vr6502->flags = pop(vr6502) | FlagU | FlagB;
   vr6502->pc = pop(vr6502);
@@ -1761,9 +1833,15 @@ static void rti(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void rts(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
+  readStackDummy(vr6502);
 
   vr6502->pc = pop(vr6502);
   vr6502->pc |= pop(vr6502) << 8;
+
+  /* backplane patch: the last cycle reads the pulled address, the last
+     byte of the JSR that pushed it, before adding one */
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
   ++vr6502->pc;
 }
 
@@ -1857,6 +1935,7 @@ static void sbc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void sec(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setBit(vr6502, FlagC);
 }
@@ -1867,6 +1946,7 @@ static void sec(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void sed(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setBit(vr6502, FlagD);
 }
@@ -1877,6 +1957,7 @@ static void sed(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void sei(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setBit(vr6502, FlagI);
 }
@@ -1919,6 +2000,7 @@ static void stz(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void tax(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, vr6502->ix = vr6502->ac);
 }
@@ -1929,6 +2011,7 @@ static void tax(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void tay(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, vr6502->iy = vr6502->ac);
 }
@@ -1939,6 +2022,7 @@ static void tay(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void tsx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, vr6502->ix = vr6502->sp);
 }
@@ -1949,6 +2033,7 @@ static void tsx(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void txa(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, vr6502->ac = vr6502->ix);
 }
@@ -1959,6 +2044,7 @@ static void txa(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void txs(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   vr6502->sp = vr6502->ix;
 }
@@ -1969,6 +2055,7 @@ static void txs(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void tya(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   setNZ(vr6502, vr6502->ac = vr6502->iy);
 }
@@ -2096,6 +2183,7 @@ static void bbs7(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { bbs(vr6502, 
 static void stp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   vr6502->stp = true;
 }
@@ -2106,6 +2194,7 @@ static void stp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void wai(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   (void)modeAddr;
+  readPcDummy(vr6502);   /* backplane patch */
 
   vr6502->wai = true;
 }

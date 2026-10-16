@@ -145,11 +145,13 @@ typedef uint8_t(*vrEmu6502MemRead)(uint16_t addr, bool isDbg, void* userData);
   * instruction fetch function pointer (backplane patch)
   *
   * Same signature as vrEmu6502MemRead.  The core calls this instead of
-  * readFn for every read whose address is PC at the time of the read: the
-  * opcode, operand bytes read directly or through the 16-bit helper, and
-  * the immediate operand.  Dereferences of a fetched address, stack reads,
-  * vector reads, and the disassembler's debug reads stay on readFn, so a
-  * host can tell an instruction fetch from a data read.
+  * readFn for each byte an instruction consumes: the opcode, the operand
+  * bytes read directly or through the 16-bit helper, the immediate
+  * operand, and the byte BRK steps over.  Every other read stays on
+  * readFn, including a dummy read of the byte at PC that the instruction
+  * does not consume, dereferences of a fetched address, stack reads,
+  * vector reads, and the disassembler's debug reads, so a host can tell
+  * an instruction fetch from a data read.
   */
 typedef uint8_t(*vrEmu6502MemFetch)(uint16_t addr, bool isDbg, void* userData);
 
