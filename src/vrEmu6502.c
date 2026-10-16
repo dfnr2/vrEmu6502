@@ -556,20 +556,30 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val)
 
 /* ------------------------------------------------------------------
  *
- * return the current opcode
+ * get / set the current opcode
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetCurrentOpcode(VrEmu6502* vr6502)
 {
   return vr6502->currentOpcode;
 }
 
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetCurrentOpcode(VrEmu6502* vr6502, uint8_t val)
+{
+  vr6502->currentOpcode = val;
+}
+
 /* ------------------------------------------------------------------
  *
- * return the current opcode address
+ * get / set the current opcode address
  */
 VR_EMU_6502_DLLEXPORT uint16_t vrEmu6502GetCurrentOpcodeAddr(VrEmu6502* vr6502)
 {
   return vr6502->currentOpcodeAddr;
+}
+
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetCurrentOpcodeAddr(VrEmu6502* vr6502, uint16_t val)
+{
+  vr6502->currentOpcodeAddr = val;
 }
 
 /* ------------------------------------------------------------------

@@ -257,15 +257,25 @@ VR_EMU_6502_DLLEXPORT void vrEmu6502SetStp(VrEmu6502* vr6502, bool val);
 
 /* ------------------------------------------------------------------
  *
- * return the current opcode
+ * get / set the current opcode.  Read by `vrEmu6502Tick` at
+ * instruction boundaries to suppress interrupt servicing for one
+ * instruction after a 1-cycle NOP (`unnop11`).  Required so that
+ * snapshot / fork can round-trip the carry-over state between
+ * instructions; without the setter, the destination resumes with
+ * `currentOpcode == 0` and serves an interrupt that the source
+ * had suppressed.
  */
 VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetCurrentOpcode(VrEmu6502* vr6502);
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetCurrentOpcode(VrEmu6502* vr6502, uint8_t val);
 
 /* ------------------------------------------------------------------
  *
- * return the current opcode address
+ * get / set the current opcode address.  Diagnostic only inside
+ * the C library; setter exists so snapshot can preserve it for
+ * accurate get-state introspection on the destination.
  */
 VR_EMU_6502_DLLEXPORT uint16_t vrEmu6502GetCurrentOpcodeAddr(VrEmu6502* vr6502);
+VR_EMU_6502_DLLEXPORT void vrEmu6502SetCurrentOpcodeAddr(VrEmu6502* vr6502, uint16_t val);
 
 /* ------------------------------------------------------------------
  *
