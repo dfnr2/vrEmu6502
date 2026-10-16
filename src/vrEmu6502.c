@@ -176,14 +176,6 @@ inline static uint16_t read16Wrapped(VrEmu6502* vr6502, uint16_t addr)
 }
 
 /*
- * additional step if page boundary crossed
- */
-inline static void pageBoundary(VrEmu6502* vr6502, uint16_t addr1, uint16_t addr2)
-{
-  vr6502->step += !!((addr1 ^ addr2) & 0xff00);
-}
-
-/*
  * set a processor status flag bit
  */
 inline static void setBit(VrEmu6502* vr6502, vrEmu6502Flag flag)
@@ -1018,8 +1010,16 @@ static uint16_t ind(VrEmu6502* vr6502)
     return read16Bug(vr6502, addr);
   }
 
+  /* backplane patch: the 65C02 takes the pointer's high byte from the next
+     address, carrying into the high byte, and spends a sixth cycle doing
+     so: between the two pointer reads it reads the address formed from
+     the pointer's high byte and its low byte plus one, without the carry.
+     The sequence follows the SingleStepTests 65x02 traces. */
   uint16_t addr = fetch16(vr6502, vr6502->pc++);
-  return read16(vr6502, addr);
+  uint16_t lo = vr6502->readFn(addr, false, vr6502->userData);
+  vr6502->readFn((addr & 0xff00) | ((addr + 1) & 0x00ff), false, vr6502->userData);
+  uint16_t hi = vr6502->readFn(addr + 1, false, vr6502->userData);
+  return lo | (hi << 8);
 }
 
 /*
@@ -1028,6 +1028,11 @@ static uint16_t ind(VrEmu6502* vr6502)
 static uint16_t indx(VrEmu6502* vr6502)
 {
   uint16_t addr = fetch16(vr6502, vr6502->pc++) + vr6502->ix;
+
+  /* backplane patch: the cycle that adds X reads the first operand byte
+     again; PC is at the second operand byte here, so that byte is the one
+     before it.  It is not consumed a second time, so the read is readFn's. */
+  vr6502->readFn((uint16_t)(vr6502->pc - 1), false, vr6502->userData);
   return read16(vr6502, addr);
 }
 
@@ -1251,7 +1256,17 @@ static void bra(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   ++vr6502->step; /* extra because we branched */
 
   uint16_t addr = modeAddr(vr6502);
-  pageBoundary(vr6502, vr6502->pc, addr);
+
+  /* backplane patch: the taken branch's extra cycle reads the address
+     after the branch, the next opcode's address, and discards it.  The
+     page-crossing cycle reads the target's low byte under the old high
+     byte.  Neither byte is consumed, so both go to readFn. */
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
+  if ((vr6502->pc ^ addr) & 0xff00)
+  {
+    ++vr6502->step;
+    vr6502->readFn((vr6502->pc & 0xff00) | (addr & 0x00ff), false, vr6502->userData);
+  }
   vr6502->pc = addr;
 }
 
@@ -2122,22 +2137,42 @@ static void smb6(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { smb(vr6502, 
 static void smb7(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { smb(vr6502, modeAddr, 7); }
 
 /*
+ * the zero-page test and branch of BBR and BBS (backplane patch)
+ *
+ * The instruction reads its zero-page byte twice, then fetches the
+ * offset.  A taken one reads the address after the instruction, one more
+ * cycle, and reads it again when the target is on another page, one more
+ * again: 5 cycles, 6 taken, 7 taken to another page.  Upstream read the
+ * byte once and counted 5 cycles whatever the branch did.  The order of
+ * these cycles follows the SingleStepTests 65x02 traces.
+ */
+static void bbBranch(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, uint8_t mask, bool ifSet)
+{
+  uint16_t zpAddr = modeAddr(vr6502);
+  uint8_t val = vr6502->readFn(zpAddr, false, vr6502->userData);
+  vr6502->readFn(zpAddr, false, vr6502->userData);
+
+  int8_t offset = (int8_t)vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
+  bool bitSet = (val & mask) != 0;
+  if (bitSet != ifSet) return;   /* not taken */
+
+  uint16_t target = vr6502->pc + offset;
+  ++vr6502->step;
+  vr6502->readFn(vr6502->pc, false, vr6502->userData);
+  if ((vr6502->pc ^ target) & 0xff00)
+  {
+    ++vr6502->step;
+    vr6502->readFn(vr6502->pc, false, vr6502->userData);
+  }
+  vr6502->pc = target;
+}
+
+/*
  * branch if bit reset (clear)
  */
 static void bbr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, int bitIndex)
 {
-  uint8_t val = readData(vr6502, modeAddr(vr6502));
-  if (!(val & (0x01 << bitIndex)))
-  {
-    vr6502->pc = rel(vr6502);
-  }
-  else
-  {
-    /* backplane patch: the displacement is instruction stream whether or not
-       the branch is taken -- the taken path fetches it through rel().  Read
-       it through fetchFn here too rather than skipping over it. */
-    vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
-  }
+  bbBranch(vr6502, modeAddr, 0x01 << bitIndex, false);   /* backplane patch */
 }
 
 static void bbr0(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { bbr(vr6502, modeAddr, 0); }
@@ -2154,18 +2189,7 @@ static void bbr7(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { bbr(vr6502, 
  */
 static void bbs(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, int bitIndex)
 {
-  uint8_t val = readData(vr6502, modeAddr(vr6502));
-  if ((val & (0x01 << bitIndex)))
-  {
-    vr6502->pc = rel(vr6502);
-  }
-  else
-  {
-    /* backplane patch: the displacement is instruction stream whether or not
-       the branch is taken -- the taken path fetches it through rel().  Read
-       it through fetchFn here too rather than skipping over it. */
-    vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
-  }
+  bbBranch(vr6502, modeAddr, 0x01 << bitIndex, true);   /* backplane patch */
 }
 
 static void bbs0(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { bbs(vr6502, modeAddr, 0); }
