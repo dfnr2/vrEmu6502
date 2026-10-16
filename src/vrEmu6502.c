@@ -236,6 +236,28 @@ inline static bool is65c02(VrEmu6502* vr6502)
     vr6502->model == CPU_R65C02;
 }
 
+/*
+ * read the operand of a read-modify-write instruction (backplane patch)
+ *
+ * Between reading its operand and writing the new value, the NMOS part
+ * writes the unmodified value back to the address, and the 65C02 reads the
+ * address a second time.  A device register at the address sees that
+ * access, so it is made here; the caller's write of the new value follows.
+ */
+inline static uint8_t rmwRead(VrEmu6502* vr6502, uint16_t addr)
+{
+  uint8_t val = vr6502->readFn(addr, false, vr6502->userData);
+  if (is65c02(vr6502))
+  {
+    vr6502->readFn(addr, false, vr6502->userData);
+  }
+  else
+  {
+    vr6502->writeFn(addr, val, vr6502->userData);
+  }
+  return val;
+}
+
 /* ------------------------------------------------------------------
  *  DECLARE OPCODE TABLES
  * ----------------------------------------------------------------*/
@@ -1007,14 +1029,6 @@ static uint16_t zpy(VrEmu6502* vr6502)
 }
 
 /*
- * temporary addresss used in illegal opcodes
- */
-static uint16_t tmp(VrEmu6502* vr6502)
-{
-  return vr6502->tmpAddr;
-}
-
-/*
  * accumulator mode (no address) - eg. ror
  */
 #define acc NULL
@@ -1032,10 +1046,8 @@ static uint16_t tmp(VrEmu6502* vr6502)
    /*
     * add with carry (deicmal mode)
     */
-static void adcd(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+static void adcd(VrEmu6502* vr6502, uint8_t value)
 {
-  uint8_t value = readData(vr6502, modeAddr(vr6502));
-
   uint8_t vu = value & 0x0f;
   uint8_t vt = (value & 0xf0) >> 4;
 
@@ -1084,17 +1096,17 @@ static void adcd(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
- * add with carry
+ * add a value with carry (backplane patch: split from adc so RRA adds the
+ * value it rotated without reading memory again)
  */
-static void adc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+static void adcValue(VrEmu6502* vr6502, uint8_t opr)
 {
   if (testBit(vr6502, FlagD))
   {
-    adcd(vr6502, modeAddr);
+    adcd(vr6502, opr);
   }
   else
   {
-    uint8_t opr = readData(vr6502, modeAddr(vr6502));
     uint16_t result = vr6502->ac + opr + testBit(vr6502, FlagC);
 
     setOrClearBit(vr6502, FlagC, result > 0xff);
@@ -1102,6 +1114,14 @@ static void adc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 
     setNZ(vr6502, vr6502->ac = (uint8_t)result);
   }
+}
+
+/*
+ * add with carry
+ */
+static void adc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+{
+  adcValue(vr6502, readData(vr6502, modeAddr(vr6502)));
 }
 
 /*
@@ -1113,22 +1133,29 @@ static void and (VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
+ * aritmetic shift left of a value, setting C, N and Z (backplane patch:
+ * shared by ASL and SLO)
+ */
+static uint8_t aslValue(VrEmu6502* vr6502, uint8_t val)
+{
+  setOrClearBit(vr6502, FlagC, val & 0x80);
+  setNZ(vr6502, val <<= 1);
+  return val;
+}
+
+/*
  * aritmetic shift left
  */
 static void asl(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
-    setOrClearBit(vr6502, FlagC, vr6502->ac & 0x80);
-    setNZ(vr6502, vr6502->ac <<= 1);
+    vr6502->ac = aslValue(vr6502, vr6502->ac);
     return;
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t result = vr6502->readFn(addr, false, vr6502->userData);
-  setOrClearBit(vr6502, FlagC, result & 0x80);
-  setNZ(vr6502, result <<= 1);
-  vr6502->writeFn(addr, result, vr6502->userData);
+  vr6502->writeFn(addr, aslValue(vr6502, rmwRead(vr6502, addr)), vr6502->userData);
 }
 
 /*
@@ -1286,15 +1313,24 @@ static void clv(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
- * compare value with accumulator
+ * compare a value with the accumulator (backplane patch: split from cmp so
+ * DCP compares the value it decremented without reading memory again)
  */
-static void cmp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+static void cmpValue(VrEmu6502* vr6502, uint8_t val)
 {
-  uint8_t opr = ~readData(vr6502, modeAddr(vr6502));
+  uint8_t opr = ~val;
   uint16_t result = vr6502->ac + opr + 1;
 
   setOrClearBit(vr6502, FlagC, result > 0xff);
   setNZ(vr6502, (uint8_t)result);
+}
+
+/*
+ * compare value with accumulator
+ */
+static void cmp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+{
+  cmpValue(vr6502, readData(vr6502, modeAddr(vr6502)));
 }
 
 /*
@@ -1333,7 +1369,7 @@ static void dec(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t val = vr6502->readFn(addr, false, vr6502->userData) - 1;
+  uint8_t val = rmwRead(vr6502, addr) - 1;   /* backplane patch: rmwRead */
   setNZ(vr6502, val);
   vr6502->writeFn(addr, val, vr6502->userData);
 }
@@ -1378,7 +1414,7 @@ static void inc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t val = vr6502->readFn(addr, false, vr6502->userData) + 1;
+  uint8_t val = rmwRead(vr6502, addr) + 1;   /* backplane patch: rmwRead */
   setNZ(vr6502, val);
   vr6502->writeFn(addr, val, vr6502->userData);
 }
@@ -1447,22 +1483,29 @@ static void ldy(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
+ * logical shift right of a value, setting C, N and Z (backplane patch:
+ * shared by LSR and SRE)
+ */
+static uint8_t lsrValue(VrEmu6502* vr6502, uint8_t val)
+{
+  setOrClearBit(vr6502, FlagC, val & 0x01);
+  setNZ(vr6502, val >>= 1);
+  return val;
+}
+
+/*
  * logical shift left
  */
 static void lsr(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
-    setOrClearBit(vr6502, FlagC, vr6502->ac & 0x01);
-    setNZ(vr6502, vr6502->ac >>= 1);
+    vr6502->ac = lsrValue(vr6502, vr6502->ac);
     return;
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t result = vr6502->readFn(addr, false, vr6502->userData);
-  setOrClearBit(vr6502, FlagC, result & 0x01);
-  setNZ(vr6502, result >>= 1);
-  vr6502->writeFn(addr, result, vr6502->userData);
+  vr6502->writeFn(addr, lsrValue(vr6502, rmwRead(vr6502, addr)), vr6502->userData);
 }
 
 /*
@@ -1585,26 +1628,44 @@ static void ply(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
+ * rotate a value left through C, setting N and Z (backplane patch: shared
+ * by ROL and RLA)
+ */
+static uint8_t rolValue(VrEmu6502* vr6502, uint8_t val)
+{
+  bool tc = val & 0x80;
+  val = (val << 1) | testBit(vr6502, FlagC);
+  setOrClearBit(vr6502, FlagC, tc);
+  setNZ(vr6502, val);
+  return val;
+}
+
+/*
  * rotate value left
  */
 static void rol(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
-    bool tc = vr6502->ac & 0x80;
-    vr6502->ac = (vr6502->ac << 1) | testBit(vr6502, FlagC);
-    setOrClearBit(vr6502, FlagC, tc);
-    setNZ(vr6502, vr6502->ac);
+    vr6502->ac = rolValue(vr6502, vr6502->ac);
     return;
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t val = vr6502->readFn(addr, false, vr6502->userData);
-  bool tc = val & 0x80;
-  val = (val << 1) | testBit(vr6502, FlagC);
+  vr6502->writeFn(addr, rolValue(vr6502, rmwRead(vr6502, addr)), vr6502->userData);
+}
+
+/*
+ * rotate a value right through C, setting N and Z (backplane patch: shared
+ * by ROR and RRA)
+ */
+static uint8_t rorValue(VrEmu6502* vr6502, uint8_t val)
+{
+  bool tc = val & 0x01;
+  val = (val >> 1) | (testBit(vr6502, FlagC) * 0x80);
   setOrClearBit(vr6502, FlagC, tc);
   setNZ(vr6502, val);
-  vr6502->writeFn(addr, val, vr6502->userData);
+  return val;
 }
 
 /*
@@ -1614,20 +1675,12 @@ static void ror(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   if (modeAddr == acc)
   {
-    bool tc = vr6502->ac & 0x01;
-    vr6502->ac = (vr6502->ac >> 1) | (testBit(vr6502, FlagC) * 0x80);
-    setOrClearBit(vr6502, FlagC, tc);
-    setNZ(vr6502, vr6502->ac);
+    vr6502->ac = rorValue(vr6502, vr6502->ac);
     return;
   }
 
   uint16_t addr = modeAddr(vr6502);
-  uint8_t val = vr6502->readFn(addr, false, vr6502->userData);
-  bool tc = val & 0x01;
-  val = (val >> 1) | (testBit(vr6502, FlagC) * 0x80);
-  setOrClearBit(vr6502, FlagC, tc);
-  setNZ(vr6502, val);
-  vr6502->writeFn(addr, val, vr6502->userData);
+  vr6502->writeFn(addr, rorValue(vr6502, rmwRead(vr6502, addr)), vr6502->userData);
 }
 
 /*
@@ -1657,9 +1710,8 @@ static void rts(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 /*
  * subtract with carry (decimal mode)
  */
-static void sbcd(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+static void sbcd(VrEmu6502* vr6502, uint8_t value)
 {
-  uint8_t value = readData(vr6502, modeAddr(vr6502));
   uint16_t binResult = vr6502->ac + ~value + testBit(vr6502, FlagC);
 
   uint16_t result = 0;
@@ -1710,17 +1762,18 @@ static void sbcd(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 }
 
 /*
- * subtract with carry
+ * subtract a value with carry (backplane patch: split from sbc so ISC
+ * subtracts the value it incremented without reading memory again)
  */
-static void sbc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+static void sbcValue(VrEmu6502* vr6502, uint8_t value)
 {
   if (testBit(vr6502, FlagD))
   {
-    sbcd(vr6502, modeAddr);
+    sbcd(vr6502, value);
     return;
   }
 
-  uint8_t opr = ~readData(vr6502, modeAddr(vr6502));
+  uint8_t opr = ~value;
   uint16_t result = vr6502->ac + opr + testBit(vr6502, FlagC);
 
   setOrClearBit(vr6502, FlagC, result > 0xff);
@@ -1728,6 +1781,14 @@ static void sbc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   vr6502->ac = (uint8_t)result;
 
   setNZ(vr6502, (uint8_t)result);
+}
+
+/*
+ * subtract with carry
+ */
+static void sbc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
+{
+  sbcValue(vr6502, readData(vr6502, modeAddr(vr6502)));
 }
 
 /*
@@ -1858,7 +1919,7 @@ static void tya(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void trb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   uint16_t addr = modeAddr(vr6502);
-  uint8_t temp = vr6502->readFn(addr, false, vr6502->userData);
+  uint8_t temp = rmwRead(vr6502, addr);   /* backplane patch: rmwRead */
   vr6502->writeFn(addr, temp & ~vr6502->ac, vr6502->userData);
   setOrClearBit(vr6502, FlagZ, !(temp & vr6502->ac));
 }
@@ -1869,7 +1930,7 @@ static void trb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void tsb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
   uint16_t addr = modeAddr(vr6502);
-  uint8_t temp = vr6502->readFn(addr, false, vr6502->userData);
+  uint8_t temp = rmwRead(vr6502, addr);   /* backplane patch: rmwRead */
   vr6502->writeFn(addr, temp | vr6502->ac, vr6502->userData);
   setOrClearBit(vr6502, FlagZ, !(temp & vr6502->ac));
 }
@@ -1880,7 +1941,8 @@ static void tsb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 static void rmb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, int bitIndex)
 {
   uint16_t addr = modeAddr(vr6502);
-  vr6502->writeFn(addr, vr6502->readFn(addr, false, vr6502->userData) & ~(0x01 << bitIndex), vr6502->userData);
+  /* backplane patch: rmwRead */
+  vr6502->writeFn(addr, rmwRead(vr6502, addr) & ~(0x01 << bitIndex), vr6502->userData);
 }
 
 static void rmb0(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { rmb(vr6502, modeAddr, 0); }
@@ -1899,7 +1961,8 @@ static void rmb7(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { rmb(vr6502, 
 static void smb(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr, int bitIndex)
 {
   uint16_t addr = modeAddr(vr6502);
-  vr6502->writeFn(addr, vr6502->readFn(addr, false, vr6502->userData) | (0x01 << bitIndex), vr6502->userData);
+  /* backplane patch: rmwRead */
+  vr6502->writeFn(addr, rmwRead(vr6502, addr) | (0x01 << bitIndex), vr6502->userData);
 }
 
 static void smb0(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr) { smb(vr6502, modeAddr, 0); }
@@ -2004,9 +2067,14 @@ static void err(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
   */
 static void slo(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  asl(vr6502, tmp);
-  ora(vr6502, tmp);
+  /* backplane patch: the combined instructions are read-modify-write
+     instructions (rmwRead) that combine the new value with the accumulator
+     without reading memory again.  Upstream ran the two halves as separate
+     instructions, so the second half read the address a further time. */
+  uint16_t addr = modeAddr(vr6502);
+  uint8_t val = aslValue(vr6502, rmwRead(vr6502, addr));
+  vr6502->writeFn(addr, val, vr6502->userData);
+  setNZ(vr6502, vr6502->ac |= val);
 }
 
 /*
@@ -2014,9 +2082,10 @@ static void slo(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void rla(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  rol(vr6502, tmp);
-  and (vr6502, tmp);
+  uint16_t addr = modeAddr(vr6502);   /* backplane patch: as slo */
+  uint8_t val = rolValue(vr6502, rmwRead(vr6502, addr));
+  vr6502->writeFn(addr, val, vr6502->userData);
+  setNZ(vr6502, vr6502->ac &= val);
 }
 
 /*
@@ -2024,9 +2093,10 @@ static void rla(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void sre(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  lsr(vr6502, tmp);
-  eor(vr6502, tmp);
+  uint16_t addr = modeAddr(vr6502);   /* backplane patch: as slo */
+  uint8_t val = lsrValue(vr6502, rmwRead(vr6502, addr));
+  vr6502->writeFn(addr, val, vr6502->userData);
+  setNZ(vr6502, vr6502->ac ^= val);
 }
 
 /*
@@ -2034,9 +2104,10 @@ static void sre(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void rra(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  ror(vr6502, tmp);
-  adc(vr6502, tmp);
+  uint16_t addr = modeAddr(vr6502);   /* backplane patch: as slo */
+  uint8_t val = rorValue(vr6502, rmwRead(vr6502, addr));
+  vr6502->writeFn(addr, val, vr6502->userData);
+  adcValue(vr6502, val);
 }
 
 /*
@@ -2060,9 +2131,10 @@ static void lax(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void dcp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  dec(vr6502, tmp);
-  cmp(vr6502, tmp);
+  uint16_t addr = modeAddr(vr6502);   /* backplane patch: as slo */
+  uint8_t val = rmwRead(vr6502, addr) - 1;
+  vr6502->writeFn(addr, val, vr6502->userData);
+  cmpValue(vr6502, val);
 }
 
 /*
@@ -2070,9 +2142,10 @@ static void dcp(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
  */
 static void isc(VrEmu6502* vr6502, vrEmu6502AddrModeFn modeAddr)
 {
-  vr6502->tmpAddr = modeAddr(vr6502);
-  inc(vr6502, tmp);
-  sbc(vr6502, tmp);
+  uint16_t addr = modeAddr(vr6502);   /* backplane patch: as slo */
+  uint8_t val = rmwRead(vr6502, addr) + 1;
+  vr6502->writeFn(addr, val, vr6502->userData);
+  sbcValue(vr6502, val);
 }
 
 /*
