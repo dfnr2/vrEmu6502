@@ -863,6 +863,39 @@ uint16_t vrEmu6502DisassembleInstruction(
  *  ADDRESS MODES
  * ----------------------------------------------------------------*/
 
+/*
+ * the dummy read of an indexed mode (backplane patch)
+ *
+ * When the index carries into the high byte, the hardware spends a cycle
+ * correcting the high byte and reads the bus in that cycle; a store or a
+ * read-modify-write takes that cycle whether or not the index carries.
+ * The NMOS part reads the uncorrected address: the base's high byte with
+ * the low byte of the indexed sum.  The 65C02 reads the instruction's last
+ * operand byte again; the mode has fetched its operand by now, so that
+ * byte is the one before PC.  Neither read is an instruction-stream byte
+ * the instruction consumes, so both go to readFn.
+ */
+inline static void indexedDummyRead(VrEmu6502* vr6502, uint16_t base, uint16_t addr)
+{
+  uint16_t dummy = is65c02(vr6502)
+    ? (uint16_t)(vr6502->pc - 1)
+    : (uint16_t)((base & 0xff00) | (addr & 0x00ff));
+  vr6502->readFn(dummy, false, vr6502->userData);
+}
+
+/*
+ * the dummy read of a zero-page indexed mode (backplane patch)
+ *
+ * zp,X, zp,Y and (zp,X) read the unindexed zero-page address in the cycle
+ * that adds the index, on every model.
+ */
+inline static uint8_t zpIndexBase(VrEmu6502* vr6502)
+{
+  uint8_t zz = vr6502->fetchFn(vr6502->pc++, false, vr6502->userData);
+  vr6502->readFn(vr6502->zpBase + zz, false, vr6502->userData);
+  return zz;
+}
+
 
  /*
   * absolute mode - eg. lda $1234
@@ -880,7 +913,10 @@ static uint16_t ab(VrEmu6502* vr6502)
 static uint16_t abx(VrEmu6502* vr6502)
 {
   uint16_t base = fetch16(vr6502, vr6502->pc++); ++vr6502->pc;
-  return base + vr6502->ix;
+  uint16_t addr = base + vr6502->ix;
+  /* backplane patch: stores and read-modify-writes always take the cycle */
+  indexedDummyRead(vr6502, base, addr);
+  return addr;
 }
 
 /*
@@ -889,7 +925,10 @@ static uint16_t abx(VrEmu6502* vr6502)
 static uint16_t aby(VrEmu6502* vr6502)
 {
   uint16_t base = fetch16(vr6502, vr6502->pc++); ++vr6502->pc;
-  return base + vr6502->iy;
+  uint16_t addr = base + vr6502->iy;
+  /* backplane patch: stores and read-modify-writes always take the cycle */
+  indexedDummyRead(vr6502, base, addr);
+  return addr;
 }
 
 /*
@@ -899,7 +938,12 @@ static uint16_t axp(VrEmu6502* vr6502)
 {
   uint16_t base = fetch16(vr6502, vr6502->pc++); ++vr6502->pc;
   uint16_t addr = base + vr6502->ix;
-  pageBoundary(vr6502, addr, base);
+  /* backplane patch: the page-crossing cycle makes its dummy read */
+  if ((addr ^ base) & 0xff00)
+  {
+    ++vr6502->step;
+    indexedDummyRead(vr6502, base, addr);
+  }
   return addr;
 }
 
@@ -910,7 +954,12 @@ static uint16_t ayp(VrEmu6502* vr6502)
 {
   uint16_t base = fetch16(vr6502, vr6502->pc++); ++vr6502->pc;
   uint16_t addr = base + vr6502->iy;
-  pageBoundary(vr6502, addr, base);
+  /* backplane patch: the page-crossing cycle makes its dummy read */
+  if ((addr ^ base) & 0xff00)
+  {
+    ++vr6502->step;
+    indexedDummyRead(vr6502, base, addr);
+  }
   return addr;
 }
 
@@ -972,7 +1021,8 @@ static uint16_t rel(VrEmu6502* vr6502)
  */
 static uint16_t xin(VrEmu6502* vr6502)
 {
-  return read16Wrapped(vr6502, (vr6502->zpBase + vr6502->fetchFn(vr6502->pc++, false, vr6502->userData) + vr6502->ix) & 0xff);
+  /* backplane patch: zpIndexBase reads $00zz before the index is added */
+  return read16Wrapped(vr6502, (vr6502->zpBase + zpIndexBase(vr6502) + vr6502->ix) & 0xff);
 }
 
 /*
@@ -982,6 +1032,9 @@ static uint16_t yin(VrEmu6502* vr6502)
 {
   uint16_t base = read16Wrapped(vr6502, vr6502->zpBase + vr6502->fetchFn(vr6502->pc++, false, vr6502->userData));
   uint16_t addr = base + vr6502->iy;
+  /* backplane patch: stores and read-modify-writes always take the cycle,
+     after the two pointer reads */
+  indexedDummyRead(vr6502, base, addr);
   return addr;
 }
 
@@ -992,7 +1045,12 @@ static uint16_t yip(VrEmu6502* vr6502)
 {
   uint16_t base = read16Wrapped(vr6502, vr6502->zpBase + vr6502->fetchFn(vr6502->pc++, false, vr6502->userData));
   uint16_t addr = base + vr6502->iy;
-  pageBoundary(vr6502, base, addr);
+  /* backplane patch: the page-crossing cycle makes its dummy read */
+  if ((addr ^ base) & 0xff00)
+  {
+    ++vr6502->step;
+    indexedDummyRead(vr6502, base, addr);
+  }
   return addr;
 }
 
@@ -1017,7 +1075,8 @@ static uint16_t zpi(VrEmu6502* vr6502)
  */
 static uint16_t zpx(VrEmu6502* vr6502)
 {
-  return vr6502->zpBase + ((vr6502->fetchFn(vr6502->pc++, false, vr6502->userData) + vr6502->ix) & 0xff);
+  /* backplane patch: zpIndexBase reads $00zz before the index is added */
+  return vr6502->zpBase + ((zpIndexBase(vr6502) + vr6502->ix) & 0xff);
 }
 
 /*
@@ -1025,7 +1084,8 @@ static uint16_t zpx(VrEmu6502* vr6502)
  */
 static uint16_t zpy(VrEmu6502* vr6502)
 {
-  return vr6502->zpBase + ((vr6502->fetchFn(vr6502->pc++, false, vr6502->userData) + vr6502->iy) & 0xff);
+  /* backplane patch: zpIndexBase reads $00zz before the index is added */
+  return vr6502->zpBase + ((zpIndexBase(vr6502) + vr6502->iy) & 0xff);
 }
 
 /*
