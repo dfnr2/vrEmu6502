@@ -702,8 +702,16 @@ uint16_t vrEmu6502DisassembleInstruction(
     uint16_t arg16 = (vr6502->readFn(addr + 2, true, vr6502->userData) << 8) | arg8;
     const char* mnemonic = vrEmu6502OpcodeToMnemonicStr(vr6502, opcode);
 
+    /* Branch target, narrowed to 16 bits once.  The C expression
+       addr + (int8_t)arg8 + 2 promotes to int, so a branch near the top
+       of memory yields e.g. 0x10001, which would index labelMap out of
+       bounds and print as $10001.  Hardware wraps the program counter,
+       so the target is the low 16 bits. */
+    uint16_t relTarget = (uint16_t)(addr + (int8_t)arg8 + 2);
+
     const char* addr8Label = labelMap ? labelMap[arg8] : NULL;
     const char* addr16Label = labelMap ? labelMap[arg16] : NULL;
+    const char* relLabel = labelMap ? labelMap[relTarget] : NULL;
 
     int offset = snprintf(buffer, bufferSize, "%s ", mnemonic);
     buffer += offset;
@@ -776,11 +784,11 @@ uint16_t vrEmu6502DisassembleInstruction(
         return addr + 2;
 
       case AddrModeRel:
-        if (labelMap && labelMap[addr + (int8_t)arg8 + 2])
-          snprintf(buffer, bufferSize, "%s", labelMap[addr + (int8_t)arg8 + 2]);
+        if (relLabel)
+          snprintf(buffer, bufferSize, "%s", relLabel);
         else
-          snprintf(buffer, bufferSize, "$%04x", addr + (int8_t)arg8 + 2);
-        if (refAddr) *refAddr = addr + (int8_t)arg8 + 2;
+          snprintf(buffer, bufferSize, "$%04x", relTarget);
+        if (refAddr) *refAddr = relTarget;
         return addr + 2;
 
       case AddrModeZP:
