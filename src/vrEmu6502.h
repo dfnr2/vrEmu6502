@@ -141,6 +141,18 @@ typedef void(*vrEmu6502MemWrite)(uint16_t addr, uint8_t val, void* userData);
   */
 typedef uint8_t(*vrEmu6502MemRead)(uint16_t addr, bool isDbg, void* userData);
 
+/*
+  * instruction fetch function pointer (backplane patch)
+  *
+  * Same signature as vrEmu6502MemRead.  The core calls this instead of
+  * readFn for every read whose address is PC at the time of the read: the
+  * opcode, operand bytes read directly or through the 16-bit helper, and
+  * the immediate operand.  Dereferences of a fetched address, stack reads,
+  * vector reads, and the disassembler's debug reads stay on readFn, so a
+  * host can tell an instruction fetch from a data read.
+  */
+typedef uint8_t(*vrEmu6502MemFetch)(uint16_t addr, bool isDbg, void* userData);
+
 
 /*
  * create a new 6502
@@ -148,6 +160,7 @@ typedef uint8_t(*vrEmu6502MemRead)(uint16_t addr, bool isDbg, void* userData);
 VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
                                     vrEmu6502Model model,
                                     vrEmu6502MemRead readFn,
+                                    vrEmu6502MemFetch fetchFn,
                                     vrEmu6502MemWrite writeFn,
                                     void* userData);
 

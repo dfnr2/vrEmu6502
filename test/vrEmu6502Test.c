@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
   /*
    * build and test the cpu
    */
-  VrEmu6502* vr6502 = vrEmu6502New(cpuModel, MemRead, MemWrite, NULL);
+  VrEmu6502* vr6502 = vrEmu6502New(cpuModel, MemRead, MemRead, MemWrite, NULL);
   if (vr6502)
   {
     /* reset the cpu (technically don't need to do this as vrEmu6502New does reset it) */
